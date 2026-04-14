@@ -114,6 +114,47 @@ uv run python -m pytest tests/ -v
 
 ## Training Details
 
+### Real-Time Chunking (RTC)
+
+Training-time RTC (arXiv:2512.05964) for smooth action chunk transitions.
+Action horizon H is split into prefix (d steps) and postfix (H-d steps):
+
+```
+Action chunk: [a_1, a_2, ..., a_d, a_{d+1}, ..., a_H]
+               ├─── prefix ───┤  ├──── postfix ────┤
+               ground-truth        flow matching
+               τ = 1 (no noise)    τ ~ U(0,1)
+               loss = 0            loss = MSE
+```
+
+- **Training**: prefix tokens get ground-truth actions with τ=1, postfix tokens get standard noised interpolation. Loss is computed only on postfix. Per-token timestep conditioning via AdaRMSNorm.
+- **Inference**: previous chunk's last d actions become the next chunk's prefix (held fixed during ODE integration), ensuring temporal consistency.
+
+```python
+# Training with RTC (prefix_len=4)
+loss = flow_loss(expert, actions, state, context, prefix_len=4)
+
+# Inference with RTC prefix
+actions = sampler.sample(expert, shape, state, context,
+                         action_prefix=prev_actions[:, -4:])
+```
+
+### FAST Action Tokenizer (π0-FAST)
+
+FAST (Fast Action STructured Tokenizer) converts continuous actions into discrete tokens for autoregressive prediction by the backbone.
+
+```
+Encode: actions (H, D) → DCT → quantize → token sequence
+Decode: token sequence → dequantize → inverse DCT → actions (H, D)
+```
+
+- Uses pretrained HuggingFace tokenizer (`physical-intelligence/fast`)
+- Action tokens are mapped to the high end of the backbone vocabulary
+- Attention: prefix (instruction + state) = bidirectional, action tokens = causal
+- Loss: cross-entropy on action token positions only
+
+Used in Knowledge Insulation where the backbone predicts FAST tokens (Path 1) while the action expert predicts continuous actions via flow matching (Path 2).
+
 ### Knowledge Insulation (π0.6 method)
 
 ```
