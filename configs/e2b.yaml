@@ -1,0 +1,25 @@
+# Gemma4-VLA Lightweight: E2B backbone (on-device)
+
+backbone:
+  model: google/gemma-4-E2B-it
+  dtype: bfloat16
+  freeze: true
+
+action_expert:
+  width: 1024
+  depth: 18
+  heads: 8
+  head_dim: 64
+  mlp_dim: 4096
+
+action:
+  dim: 8
+  horizon: 15
+
+flow_matching:
+  steps: 10
+
+training:
+  lr: 1.0e-4
+  max_steps: 30000
+  batch_size: 64

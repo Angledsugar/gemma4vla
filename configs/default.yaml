@@ -1,0 +1,32 @@
+# Gemma4-VLA Default Config: E4B backbone + 300M action expert
+
+backbone:
+  model: google/gemma-4-E4B-it
+  dtype: bfloat16
+  freeze: true
+
+action_expert:
+  width: 1024
+  depth: 18
+  heads: 8
+  head_dim: 64
+  mlp_dim: 4096
+
+action:
+  dim: 8            # 7 arm + 1 gripper
+  horizon: 15       # chunk length (π0.5 default)
+
+flow_matching:
+  steps: 10         # ODE integration steps at inference
+
+training:
+  lr: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_steps: 50000
+  batch_size: 32
+  save_every: 5000
+
+serving:
+  port: 8000
+  host: 0.0.0.0
