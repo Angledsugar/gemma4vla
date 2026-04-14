@@ -1,6 +1,7 @@
-# Gemma 4 + π0.6-style Action Expert VLA
+# Gemma4VLA
 
-Gemma 4 E4B backbone + π0.6-aligned action expert for robotic manipulation.
+## Gemma 4 E4B + π style action expert 
+Gemma 4 E4B backbone + π style action expert for robotic manipulation.
 42-layer shared attention, flow matching + FAST, Knowledge Insulation training.
 
 ## Architecture
@@ -132,59 +133,73 @@ uv run python -m pytest tests/ -v
 
 ### Overview
 
-Only the action expert (~834M) is trained. The Gemma 4 backbone (8B) is frozen and used as a feature extractor. Training uses flow matching loss on continuous action chunks.
+Knowledge Insulation + RTC + FAST 전체가 기본 학습 파이프라인입니다. Gemma 4 backbone (8B)은 frozen 상태에서 두 개의 분리된 gradient path로 학습합니다.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Training Step                                               │
-│                                                             │
-│  Images + Text ──→ [Gemma 4 backbone (frozen)] ──→ context  │
-│                                                             │
-│  target_actions + noise ──→ x_t = (1-t)·x_0 + t·x_1       │
-│                                                             │
-│  context + x_t + t ──→ [Action Expert (trainable)]          │
-│                        ──→ predicted velocity v_θ           │
-│                                                             │
-│  Loss = MSE(v_θ, x_1 - x_0)                                │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ Training Step (Knowledge Insulation + RTC)                       │
+│                                                                  │
+│  Images + Text ──→ [Gemma 4 backbone (frozen)] ──→ context       │
+│                                                                  │
+│  ┌─── Path 1: Backbone ──────────────────────────────────────┐   │
+│  │  actions → FAST encode → discrete tokens                  │   │
+│  │  context → FASTActionHead → predicted tokens              │   │
+│  │  Loss = CrossEntropy (action token positions only)        │   │
+│  │  → gradient updates backbone head only                    │   │
+│  └───────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌─── Path 2: Action Expert (with RTC) ──────────────────────┐   │
+│  │  context.detach() (stop gradient to backbone)             │   │
+│  │                                                           │   │
+│  │  RTC split: [prefix d steps | postfix H-d steps]         │   │
+│  │    prefix:  ground-truth actions, τ=1 (no noise)         │   │
+│  │    postfix: x_t = (1-t)·x_0 + t·x_1, τ~U(0,1)          │   │
+│  │                                                           │   │
+│  │  context + x_t + per-token τ → [Action Expert]            │   │
+│  │                                → predicted velocity v_θ   │   │
+│  │  Loss = MSE(v_θ, x_1 - x_0) on postfix only             │   │
+│  │  → gradient updates expert only                           │   │
+│  └───────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  Total: backbone_loss + expert_loss (separate optimizers)        │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### Training modes
-
-**1. Standard (expert-only)**
-
-The simplest mode. Only the action expert is trained with flow matching loss. Backbone features are computed with `torch.no_grad()` and detached.
+### Default training (full pipeline)
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run scripts/train_droid.py \
-    --data_dir /path/to/droid_100 --steps 1000 --lr 1e-4
+    --data_dir /path/to/droid_100 \
+    --steps 10000 \
+    --rtc --rtc_max_delay 4 \
+    --knowledge_insulation \
+    --lr 1e-4 --lr_backbone 1e-5
 ```
 
-**2. Knowledge Insulation (recommended for long training)**
+- **Knowledge Insulation**: backbone은 FAST 토큰 예측 (cross-entropy, lr=1e-5), expert는 flow matching (MSE, lr=1e-4). `context.detach()`로 gradient 분리.
+- **RTC**: 매 학습 step에서 prefix 길이 d를 {0,1,2,3,4}에서 샘플링 (P(d) ~ 0.5^d). prefix는 ground-truth + τ=1, postfix만 loss 계산.
+- **FAST**: backbone이 action을 이해하도록 discrete token prediction을 auxiliary objective로 사용.
 
-Two separate gradient paths with separate optimizers:
-- Path 1 (Backbone, lr=1e-5): FAST token prediction (cross-entropy)
-- Path 2 (Expert, lr=1e-4): Flow matching (MSE), context is detached
+### Simplified modes
+
+전체 파이프라인 없이 개별 기능만 사용할 수도 있습니다.
 
 ```bash
+# Expert-only (flow matching만, KI/RTC 없음)
+CUDA_VISIBLE_DEVICES=0 uv run scripts/train_droid.py \
+    --data_dir /path/to/droid_100 --steps 1000 --lr 1e-4
+
+# KI만 (RTC 없음)
 CUDA_VISIBLE_DEVICES=0 uv run scripts/train_droid.py \
     --data_dir /path/to/droid_100 --steps 10000 \
     --knowledge_insulation --lr 1e-4 --lr_backbone 1e-5
-```
 
-**3. Training-Time RTC**
-
-Adds action prefix conditioning. Each training step samples a random prefix length d from {0, 1, 2, 3, 4} with exponentially decaying weights (P(d) ~ 0.5^d). Can be combined with Knowledge Insulation.
-
-```bash
-# RTC only
+# RTC만 (KI 없음)
 CUDA_VISIBLE_DEVICES=0 uv run scripts/train_droid.py \
-    --data_dir /path/to/droid_100 --steps 10000 --rtc --rtc_max_delay 4
+    --data_dir /path/to/droid_100 --steps 10000 --rtc
 
-# RTC + Knowledge Insulation (full pipeline)
-CUDA_VISIBLE_DEVICES=0 uv run scripts/train_droid.py \
-    --data_dir /path/to/droid_100 --steps 10000 \
-    --rtc --knowledge_insulation
+# Dummy mode (CPU, shape testing only)
+uv run scripts/train_droid.py --dummy --steps 5 --device cpu
 ```
 
 ### Optimizer and scheduler
